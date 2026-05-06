@@ -1,0 +1,17 @@
+# Credentials — never commit these
+.pots_credentials
+.pots_salt
+C:/certs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Streamlit
+.streamlit/
+
+# OS
+.DS_Store
+Thumbs.db

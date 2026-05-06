@@ -1,0 +1,5 @@
+rich>=13.0.0
+streamlit>=1.35.0
+betfairlightweight>=2.23.0
+cryptography>=42.0.0
+requests>=2.31.0
