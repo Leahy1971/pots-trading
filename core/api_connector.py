@@ -216,19 +216,36 @@ class BetfairConnector:
             except Exception:
                 pass
 
-        # Fall back to interactive (non-cert) login for cloud deployment
+        # Cloud fallback — Betfair bot login (no certificate required)
+        # This uses the non-interactive endpoint which accepts credentials directly
         try:
-            self._client = _bfl.APIClient(
-                username=self._username,
-                password=self._password,
-                app_key=self._app_key,
+            import requests
+            resp = requests.post(
+                "https://identitysso-cert.betfair.com/api/certlogin",
+                data={
+                    "username": self._username,
+                    "password": self._password,
+                },
+                headers={
+                    "X-Application": self._app_key,
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                timeout=10,
             )
-            self._client.login_interactive()
-            return True
+            data = resp.json()
+            if data.get("loginStatus") == "SUCCESS":
+                token = data["sessionToken"]
+                self._client = _bfl.APIClient(
+                    username=self._username,
+                    password=self._password,
+                    app_key=self._app_key,
+                )
+                self._client.session_token = token
+                return True
         except Exception:
             pass
 
-        # Final fallback — session token via requests
+        # Last resort — identitysso (for accounts without 2FA)
         try:
             import requests
             resp = requests.post(
@@ -237,7 +254,10 @@ class BetfairConnector:
                     "username": self._username,
                     "password": self._password,
                 },
-                headers={"X-Application": self._app_key},
+                headers={
+                    "X-Application": self._app_key,
+                    "Accept": "application/json",
+                },
                 timeout=10,
             )
             data = resp.json()

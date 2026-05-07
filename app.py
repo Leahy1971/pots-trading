@@ -238,19 +238,24 @@ def _login_from_secrets() -> bool:
         username = secrets["BETFAIR_USERNAME"]
         password = secrets["BETFAIR_PASSWORD"]
         app_key  = secrets["BETFAIR_APP_KEY"]
-        connector = BetfairConnector(
-            username=username,
-            password=password,
-            app_key=app_key,
-            demo=False,
-        )
-        if connector.login():
-            st.session_state.authenticated = True
-            st.session_state.connector     = connector
-            st.session_state.engine        = AnalysisEngine()
-            return True
     except Exception:
-        pass
+        return False  # No secrets configured
+
+    connector = BetfairConnector(
+        username=username,
+        password=password,
+        app_key=app_key,
+        demo=False,
+    )
+    if connector.login():
+        st.session_state.authenticated = True
+        st.session_state.connector     = connector
+        st.session_state.engine        = AnalysisEngine()
+        return True
+
+    # Show diagnostic info if login fails
+    st.warning(f"Cloud auto-login attempted for {username} — failed. "
+               f"Check secrets and Betfair account settings.")
     return False
 
 
