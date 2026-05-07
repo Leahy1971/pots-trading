@@ -231,6 +231,29 @@ def _verdict_card_html(sig: Signal) -> str:
 
 # ── Login / setup screen ──────────────────────────────────────────────────────
 
+def _login_from_secrets() -> bool:
+    """Try to login using Streamlit cloud secrets. Returns True on success."""
+    try:
+        secrets = st.secrets
+        username = secrets["BETFAIR_USERNAME"]
+        password = secrets["BETFAIR_PASSWORD"]
+        app_key  = secrets["BETFAIR_APP_KEY"]
+        connector = BetfairConnector(
+            username=username,
+            password=password,
+            app_key=app_key,
+            demo=False,
+        )
+        if connector.login():
+            st.session_state.authenticated = True
+            st.session_state.connector     = connector
+            st.session_state.engine        = AnalysisEngine()
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def render_login():
     st.markdown("""
     <div class="pots-header">
@@ -238,6 +261,11 @@ def render_login():
         <p class="pots-subtitle">PREOFF TRADING SYSTEM</p>
     </div>
     """, unsafe_allow_html=True)
+
+    # Try cloud secrets first (Streamlit Cloud deployment)
+    if _login_from_secrets():
+        st.rerun()
+        return
 
     if store.exists():
         st.markdown("### 🔐 Enter Master Password")
