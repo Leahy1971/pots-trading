@@ -192,8 +192,6 @@ class BetfairConnector:
         """Login to Betfair; returns True on success."""
         if self._demo:
             return True
-        # Re-attempt import at login time in case the module-level
-        # try/except failed silently on Python 3.14+
         try:
             import betfairlightweight as _bfl
         except Exception as exc:
@@ -201,17 +199,61 @@ class BetfairConnector:
                 f"betfairlightweight could not be imported: {exc}\n"
                 "Run:  pip install betfairlightweight"
             )
-        self._client = _bfl.APIClient(
-            username=self._username,
-            password=self._password,
-            app_key=self._app_key,
-            certs="C:/certs",
-        )
+
+        # Try cert-based login first (local PC with C:/certs)
+        import os
+        cert_path = "C:/certs"
+        if os.path.exists(cert_path):
+            try:
+                self._client = _bfl.APIClient(
+                    username=self._username,
+                    password=self._password,
+                    app_key=self._app_key,
+                    certs=cert_path,
+                )
+                self._client.login()
+                return True
+            except Exception:
+                pass
+
+        # Fall back to interactive (non-cert) login for cloud deployment
         try:
-            self._client.login()
+            self._client = _bfl.APIClient(
+                username=self._username,
+                password=self._password,
+                app_key=self._app_key,
+            )
+            self._client.login_interactive()
             return True
         except Exception:
-            return False
+            pass
+
+        # Final fallback — session token via requests
+        try:
+            import requests
+            resp = requests.post(
+                "https://identitysso.betfair.com/api/login",
+                data={
+                    "username": self._username,
+                    "password": self._password,
+                },
+                headers={"X-Application": self._app_key},
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("status") == "SUCCESS":
+                token = data["token"]
+                self._client = _bfl.APIClient(
+                    username=self._username,
+                    password=self._password,
+                    app_key=self._app_key,
+                )
+                self._client.session_token = token
+                return True
+        except Exception:
+            pass
+
+        return False
 
     def logout(self) -> None:
         if self._client:
