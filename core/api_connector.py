@@ -342,11 +342,21 @@ class BetfairConnector:
                 back_vol = sum(ps.size for ps in back_prices)
                 lay_vol  = sum(ps.size for ps in lay_prices)
 
-                # Traded grid from ex_traded
+                # Traded grid — build from available back prices as proxy
+                # (EX_TRADED data not available in this API version)
                 traded_grid: dict = {}
-                if ex and hasattr(ex, "traded") and ex.traded:
-                    for ps in ex.traded:
+                if ex:
+                    for ps in ex.available_to_back:
                         traded_grid[ps.price] = traded_grid.get(ps.price, 0) + ps.size
+
+                # total_matched — use API value if available
+                # Fall back to summing available back+lay sizes as a liquidity proxy
+                api_matched = r.total_matched or 0
+                if api_matched == 0:
+                    back_size = sum(ps.size for ps in back_prices)
+                    lay_size  = sum(ps.size for ps in lay_prices)
+                    api_matched = back_size + lay_size
+                total_matched = api_matched
 
                 runners.append({
                     "name":           runner_map.get(r.selection_id, str(r.selection_id)),
@@ -355,7 +365,7 @@ class BetfairConnector:
                     "lpt":            lpt,
                     "back_unmatched": back_vol,
                     "lay_unmatched":  lay_vol,
-                    "total_matched":  r.total_matched or 0,
+                    "total_matched":  total_matched,
                     "traded_grid":    traded_grid,
                     "price_history":  [],
                 })

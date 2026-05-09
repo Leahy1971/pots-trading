@@ -128,6 +128,23 @@ st.markdown("""
     h1, h2, h3, h4 { color: #f0f0f0 !important; }
     label { color: #ccc !important; }
     .stMetric { background: #262932; border-radius: 6px; padding: 8px; }
+
+    /* Mobile responsive */
+    @media (max-width: 768px) {
+        .pots-title { font-size: 1.5rem; letter-spacing: 3px; }
+        .pots-subtitle { font-size: 0.65rem; }
+        .pots-header { padding: 10px 12px; }
+        .block-container { padding: 0.5rem 0.5rem !important; }
+        .wom-label { width: 80px; font-size: 0.7rem; }
+        .wom-pct { width: 40px; font-size: 0.7rem; }
+        .verdict-back, .verdict-lay, .verdict-scalp, .verdict-none {
+            padding: 8px 10px;
+            font-size: 0.85rem;
+        }
+        .countdown-green, .countdown-yellow, .countdown-red {
+            font-size: 1rem;
+        }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -144,6 +161,7 @@ def _init_state():
         "last_fetch":     0.0,
         "error":          "",
         "master_pw":      "",
+        "price_histories": {},   # runner_name -> list of prices
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -221,10 +239,25 @@ def _verdict_card_html(sig: Signal) -> str:
                "SCALP": "verdict-scalp", "NONE": "verdict-none"}
     cls = cls_map.get(sig.verdict_code, "verdict-none")
     sm  = '<span class="smart-money">⚡ Smart Money</span>' if sig.smart_money else ""
+
+    # Diagnostics line — shows why signal is what it is
+    diag = []
+    diag.append(f"WOM {sig.wom:.0%}")
+    if sig.wom_delta:
+        diag.append(f"delta {sig.wom_delta:+.0%}/60s")
+    if sig.total_matched >= 1000:
+        diag.append(f"£{sig.total_matched/1000:.1f}k matched")
+    else:
+        diag.append(f"£{sig.total_matched:.0f} matched")
+    if not sig.spread_ok:
+        diag.append("⚠ Wide spread")
+    diag_str = " · ".join(diag)
+
     return (
         f'<div class="{cls}">'
         f'<strong style="font-size:1rem">{sig.runner_name}</strong> {sm}<br>'
-        f'<span style="font-size:0.85rem;color:#ccc">{sig.verdict}</span>'
+        f'<span style="font-size:0.85rem;color:#ccc">{sig.verdict}</span><br>'
+        f'<span style="font-size:0.72rem;color:#777">{diag_str}</span>'
         f'</div>'
     )
 
@@ -363,10 +396,11 @@ def render_dashboard():
             st.rerun()
 
     if load_btn and raw_url:
-        st.session_state.market_id   = _parse_market_id(raw_url)
-        st.session_state.market_data = None
-        st.session_state.signals     = []
-        st.session_state.error       = ""
+        st.session_state.market_id     = _parse_market_id(raw_url)
+        st.session_state.market_data   = None
+        st.session_state.signals       = []
+        st.session_state.error         = ""
+        st.session_state.price_histories = {}
 
     if not st.session_state.market_id:
         st.info("👆 Paste a Betfair race URL above and press Load to begin.")
@@ -378,8 +412,22 @@ def render_dashboard():
         data = st.session_state.connector.fetch_market(st.session_state.market_id)
         if data and "_error" not in data:
             st.session_state.market_data = data
-            st.session_state.signals     = st.session_state.engine.analyse(data)
-            st.session_state.error       = ""
+            signals = st.session_state.engine.analyse(data)
+            # Persist price histories across Streamlit reruns
+            for sig in signals:
+                name = sig.runner_name
+                if name not in st.session_state.price_histories:
+                    st.session_state.price_histories[name] = []
+                mid = ((sig.back_price or 0) + (sig.lay_price or 0)) / 2
+                if mid > 0:
+                    st.session_state.price_histories[name].append(mid)
+                    # Keep last 120 points (10 mins at 5s intervals)
+                    if len(st.session_state.price_histories[name]) > 120:
+                        st.session_state.price_histories[name].pop(0)
+                # Inject persisted history into signal
+                sig.price_history = list(st.session_state.price_histories[name])
+            st.session_state.signals = signals
+            st.session_state.error   = ""
         else:
             st.session_state.error = data.get("_error", "Unknown error") if data else "No data returned"
         st.session_state.last_fetch = now
@@ -422,64 +470,141 @@ def render_dashboard():
 
     st.markdown("---")
 
-    # ── Two column layout ──────────────────────────────────────────────────────
-    left, right = st.columns([3, 2])
+    # ── Runner table (compact, mobile-friendly) ───────────────────────────────
+    st.markdown("#### 📊 Runners")
 
-    with left:
-        # Runner table
-        st.markdown("#### 📊 Runners")
-        header = st.columns([3, 1, 1, 1, 2, 2])
-        for col, label in zip(header, ["Runner", "Back", "Lay", "LPT", "Trend", "Confidence"]):
-            col.markdown(f"<small style='color:#888'>{label}</small>", unsafe_allow_html=True)
+    # Build a single HTML table — much more mobile-friendly than st.columns
+    rows = ""
+    for sig in signals:
+        trend_colour = {"Steaming": "#2ecc71", "Drifting": "#e74c3c"}.get(sig.price_trend, "#f39c12")
+        trend_arrow  = {"Steaming": "▼", "Drifting": "▲"}.get(sig.price_trend, "─")
+        conf_colour  = "#27ae60" if sig.confidence >= 7 else "#f39c12" if sig.confidence >= 4 else "#e74c3c"
+        vol = sig.total_matched
+        if vol >= 1000:
+            vol_str = f"£{vol/1000:.1f}k"
+        else:
+            vol_str = f"£{vol:.0f}"
+        rows += f"""
+        <tr>
+            <td style="color:#fff;font-weight:bold;padding:6px 4px">{sig.runner_name[:16]}</td>
+            <td style="color:#2ecc71;font-weight:bold;text-align:center">{sig.back_price or "—"}</td>
+            <td style="color:#e74c3c;font-weight:bold;text-align:center">{sig.lay_price or "—"}</td>
+            <td style="color:#f39c12;text-align:center">{sig.lpt or "—"}</td>
+            <td style="color:{trend_colour};text-align:center">{trend_arrow}</td>
+            <td style="color:#aed6f1;text-align:center">{vol_str}</td>
+            <td style="color:{conf_colour};text-align:center;font-weight:bold">{sig.confidence}/10</td>
+        </tr>"""
 
-        for sig in signals:
-            cols = st.columns([3, 1, 1, 1, 2, 2])
-            trend_colour = {"Steaming": "#00ff88", "Drifting": "#ff4444"}.get(sig.price_trend, "#ffcc00")
-            trend_arrow  = {"Steaming": "▼", "Drifting": "▲"}.get(sig.price_trend, "─")
+    table_html = f"""
+    <div style="overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+        <thead>
+            <tr style="border-bottom:1px solid #444;color:#888;font-size:0.75rem">
+                <th style="text-align:left;padding:4px">Runner</th>
+                <th>Back</th><th>Lay</th><th>LPT</th><th>Trend</th><th>Matched</th><th>Conf</th>
+            </tr>
+        </thead>
+        <tbody>{rows}</tbody>
+    </table>
+    </div>"""
+    st.markdown(table_html, unsafe_allow_html=True)
 
-            cols[0].markdown(f"**{sig.runner_name[:20]}**")
-            cols[1].markdown(f'<span class="odds-back">{sig.back_price or "—"}</span>',
-                             unsafe_allow_html=True)
-            cols[2].markdown(f'<span class="odds-lay">{sig.lay_price or "—"}</span>',
-                             unsafe_allow_html=True)
-            cols[3].markdown(f'<span class="odds-lpt">{sig.lpt or "—"}</span>',
-                             unsafe_allow_html=True)
-            cols[4].markdown(
-                f'<span style="color:{trend_colour}">{trend_arrow} {sig.price_trend}</span>',
-                unsafe_allow_html=True,
+    st.markdown("---")
+
+    # ── WOM bars ───────────────────────────────────────────────────────────────
+    st.markdown("#### 💰 Weight of Money")
+    wom_html = "".join(
+        _wom_bar_html(s.runner_name, s.wom, s.wom_delta) for s in signals
+    )
+    st.markdown(wom_html, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── Price history micro charts ─────────────────────────────────────────────
+    st.markdown("#### 📈 Live Odds History")
+
+    # Build chart data from price_history stored in signals
+    chart_signals = [s for s in signals if len(s.price_history) >= 2]
+    if not chart_signals:
+        st.caption("Accumulating price history — charts appear after a few polls...")
+    else:
+        import json
+        # Pick top 4 runners by matched volume for the chart
+        top_runners = sorted(chart_signals, key=lambda s: s.total_matched, reverse=True)[:4]
+
+        for sig in top_runners:
+            history = sig.price_history[-60:]  # Last 60 data points max
+            if len(history) < 2:
+                continue
+
+            # Determine chart colour based on trend
+            line_colour = {"Steaming": "#2ecc71", "Drifting": "#e74c3c"}.get(
+                sig.price_trend, "#f39c12"
             )
-            cols[5].markdown(_conf_bar_html(sig.confidence), unsafe_allow_html=True)
 
-        # WOM bars
-        st.markdown("#### 💰 Weight of Money")
-        wom_html = "".join(
-            _wom_bar_html(s.runner_name, s.wom, s.wom_delta) for s in signals
-        )
-        st.markdown(wom_html, unsafe_allow_html=True)
+            # Build sparkline as SVG
+            min_p = min(history)
+            max_p = max(history)
+            price_range = max_p - min_p if max_p != min_p else 0.1
+            w, h = 300, 50
+            points = []
+            for i, p in enumerate(history):
+                x = int(i / (len(history) - 1) * w)
+                y = int(h - ((p - min_p) / price_range) * (h - 4) - 2)
+                points.append(f"{x},{y}")
+            polyline = " ".join(points)
 
-    with right:
-        # Trade verdicts
-        st.markdown("#### 🎯 Trade Verdicts")
-        for sig in signals:
-            st.markdown(_verdict_card_html(sig), unsafe_allow_html=True)
+            # Current price vs start — show direction
+            price_change = history[-1] - history[0]
+            change_str = f"{'▼' if price_change < 0 else '▲' if price_change > 0 else '─'} {abs(price_change):.2f}"
+            change_col = "#2ecc71" if price_change < 0 else "#e74c3c" if price_change > 0 else "#888"
 
-        # Top signal detail
-        if signals:
-            top = signals[0]
-            if top.verdict_code != "NONE":
-                st.markdown("---")
-                st.markdown(f"#### 🔍 Top Signal: {top.runner_name}")
-                col_a, col_b = st.columns(2)
-                col_a.metric("Back", f"{top.back_price or '—'}")
-                col_b.metric("Lay",  f"{top.lay_price  or '—'}")
-                col_a.metric("LPT",  f"{top.lpt or '—'}")
-                col_b.metric("EMA-20", f"{top.ema_20:.2f}" if top.ema_20 else "—")
-                if top.resistance_lvl:
-                    st.metric("Resistance Wall", f"{top.resistance_lvl:.2f}")
-                if top.reasons:
-                    st.markdown("**Signal Evidence:**")
-                    for r in top.reasons:
-                        st.markdown(f"- {r}")
+            svg = f"""
+            <div style="margin:6px 0;background:#262932;border-radius:6px;padding:8px 12px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                    <span style="color:#fff;font-weight:bold;font-size:0.85rem">{sig.runner_name[:20]}</span>
+                    <span style="color:#f39c12;font-weight:bold">{sig.back_price or "—"}</span>
+                    <span style="color:{change_col};font-size:0.8rem">{change_str}</span>
+                    <span style="color:#888;font-size:0.75rem">{len(history)} pts</span>
+                </div>
+                <svg viewBox="0 0 {w} {h}" width="100%" height="40" preserveAspectRatio="none"
+                     style="display:block">
+                    <polyline points="{polyline}"
+                        fill="none" stroke="{line_colour}" stroke-width="2"
+                        stroke-linejoin="round" stroke-linecap="round"/>
+                    <circle cx="{points[-1].split(',')[0]}" cy="{points[-1].split(',')[1]}"
+                        r="3" fill="{line_colour}"/>
+                </svg>
+                <div style="display:flex;justify-content:space-between;font-size:0.65rem;color:#555;margin-top:2px">
+                    <span>10 min ago</span><span>Now</span>
+                </div>
+            </div>"""
+            st.markdown(svg, unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ── Trade verdicts ─────────────────────────────────────────────────────────
+    st.markdown("#### 🎯 Trade Verdicts")
+    for sig in signals:
+        st.markdown(_verdict_card_html(sig), unsafe_allow_html=True)
+
+    # ── Top signal detail ──────────────────────────────────────────────────────
+    if signals:
+        top = signals[0]
+        if top.verdict_code != "NONE":
+            st.markdown("---")
+            st.markdown(f"#### 🔍 Top Signal: {top.runner_name}")
+            col_a, col_b = st.columns(2)
+            col_a.metric("Back", f"{top.back_price or '—'}")
+            col_b.metric("Lay",  f"{top.lay_price  or '—'}")
+            col_a.metric("LPT",  f"{top.lpt or '—'}")
+            col_b.metric("EMA-20", f"{top.ema_20:.2f}" if top.ema_20 else "—")
+            if top.resistance_lvl:
+                st.metric("Resistance Wall", f"{top.resistance_lvl:.2f}")
+            if top.reasons:
+                st.markdown("**Signal Evidence:**")
+                for r in top.reasons:
+                    st.markdown(f"- {r}")
 
     # ── Auto-refresh ───────────────────────────────────────────────────────────
     st.markdown("---")

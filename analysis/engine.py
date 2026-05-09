@@ -48,6 +48,7 @@ class Signal:
     smart_money:    bool           = False
     spread_ok:      bool           = True
     total_matched:  float          = 0.0
+    price_history:  List[float]    = field(default_factory=list)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -241,10 +242,10 @@ class AnalysisEngine:
         )
 
         # Minimum liquidity gate — override weak signals
-        if tot_match < 2_000 and verdict_code != "NONE":
+        if tot_match < 500 and verdict_code != "NONE":
             verdict      = "NO TRADE — Low Liquidity"
             verdict_code = "NONE"
-            reasons.append("Market liquidity below £2,000 threshold")
+            reasons.append("Market liquidity below £500 threshold")
 
         # Time gate — only trade 2–10 min before off
         if not (120 <= seconds_to_start <= 600):
@@ -271,6 +272,7 @@ class AnalysisEngine:
             smart_money=smart_money,
             spread_ok=spread_ok,
             total_matched=tot_match,
+            price_history=list(state.price_history),
         )
 
     # ── Scoring engine ─────────────────────────────────────────────────────────
@@ -426,12 +428,24 @@ class AnalysisEngine:
 
     @staticmethod
     def _price_trend(mid: float, ema: float, lpt: Optional[float]) -> str:
-        if not mid or not ema:
+        if not mid:
             return "Neutral"
-        if mid < ema * 0.99 and (lpt is None or mid < lpt):
-            return "Steaming"
-        if mid > ema * 1.01 and (lpt is None or mid > lpt):
-            return "Drifting"
+
+        # Fast signal: compare current price to last price traded
+        if lpt and lpt > 0:
+            diff = (mid - lpt) / lpt
+            if diff < -0.015:   # Price dropped >1.5% below LPT — steaming
+                return "Steaming"
+            if diff > 0.015:    # Price rose >1.5% above LPT — drifting
+                return "Drifting"
+
+        # Slower EMA signal (needs 20 data points)
+        if ema and ema > 0:
+            if mid < ema * 0.99:
+                return "Steaming"
+            if mid > ema * 1.01:
+                return "Drifting"
+
         return "Neutral"
 
     @staticmethod
