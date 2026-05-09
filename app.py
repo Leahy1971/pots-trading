@@ -24,7 +24,7 @@ st.set_page_config(
     page_title="POTS — PreOff Trading System",
     page_icon="🏇",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ── Custom CSS ────────────────────────────────────────────────────────────────
@@ -292,6 +292,76 @@ def _login_from_secrets() -> bool:
     return False
 
 
+def _fetch_todays_races(connector) -> list:
+    """Fetch today's UK horse racing WIN markets, sorted by start time."""
+    try:
+        import betfairlightweight as _bfl
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        end = now + timedelta(hours=10)
+
+        catalogues = connector._client.betting.list_market_catalogue(
+            filter=_bfl.filters.market_filter(
+                event_type_ids=["7"],
+                market_countries=["GB", "IE"],
+                market_start_time={
+                    "from": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "to":   end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                },
+            ),
+            market_projection=["EVENT", "MARKET_START_TIME", "RUNNER_DESCRIPTION"],
+            sort="FIRST_TO_START",
+            max_results=50,
+        )
+
+        races = []
+        for cat in catalogues:
+            # Only WIN markets
+            if "win" not in cat.market_name.lower() and "winner" not in cat.market_name.lower():
+                # Include if name looks like a race (has distance/time pattern)
+                if not any(x in cat.market_name for x in ["m", "f", "Hcap", "Cls", "Mdn", "Nov", "Chs", "Hrd"]):
+                    continue
+            start = cat.market_start_time
+            secs_to_start = (start - datetime.now(timezone.utc)).total_seconds()
+
+            # Convert to UK local time (BST = UTC+1, GMT = UTC+0)
+            from datetime import date
+            import time as _time
+            # Check if BST is active (last Sunday March to last Sunday October)
+            def is_bst(dt):
+                year = dt.year
+                # Last Sunday in March
+                mar = date(year, 3, 31)
+                mar_last_sun = mar - timedelta(days=mar.weekday() + 1 if mar.weekday() != 6 else 0)
+                # Last Sunday in October
+                oct = date(year, 10, 31)
+                oct_last_sun = oct - timedelta(days=oct.weekday() + 1 if oct.weekday() != 6 else 0)
+                return mar_last_sun <= dt.date() < oct_last_sun
+
+            uk_offset = timedelta(hours=1) if is_bst(start) else timedelta(hours=0)
+            uk_time = start + uk_offset
+
+            races.append({
+                "market_id":   cat.market_id,
+                "venue":       cat.event.venue or cat.event.name,
+                "name":        cat.market_name,
+                "start_time":  uk_time.strftime("%H:%M"),
+                "secs_to_off": secs_to_start,
+            })
+        return races
+    except Exception as e:
+        return []
+
+
+def _refresh_races_if_needed(connector) -> None:
+    """Refresh race list every 5 minutes."""
+    import time
+    now = time.time()
+    if "races" not in st.session_state or now - st.session_state.get("races_fetched", 0) > 300:
+        st.session_state.races = _fetch_todays_races(connector)
+        st.session_state.races_fetched = now
+
+
 def render_login():
     st.markdown("""
     <div class="pots-header">
@@ -371,6 +441,74 @@ def render_setup_form():
 # ── Main trading dashboard ────────────────────────────────────────────────────
 
 def render_dashboard():
+    # ── Sidebar race browser ──────────────────────────────────────────────────
+    _refresh_races_if_needed(st.session_state.connector)
+
+    with st.sidebar:
+        st.markdown("""
+        <div style="background:linear-gradient(90deg,#0a3d62,#1a5276);
+                    border-bottom:2px solid #f39c12;padding:10px 14px;
+                    border-radius:6px;margin-bottom:12px">
+            <span style="color:#f39c12;font-weight:900;font-size:1.1rem;letter-spacing:2px">🏇 POTS</span><br>
+            <span style="color:#aed6f1;font-size:0.7rem;letter-spacing:1px">RACE BROWSER</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button("🔄 Refresh Races", use_container_width=True):
+            st.session_state.races_fetched = 0
+            _refresh_races_if_needed(st.session_state.connector)
+
+        races = st.session_state.get("races", [])
+        if not races:
+            st.info("No upcoming UK/IRE races found.")
+        else:
+            # Group by venue
+            from collections import defaultdict
+            by_venue = defaultdict(list)
+            for r in races:
+                by_venue[r["venue"]].append(r)
+
+            for venue, venue_races in sorted(by_venue.items()):
+                st.markdown(f"**📍 {venue}**")
+                for race in venue_races:
+                    secs = race["secs_to_off"]
+                    mins = int(secs // 60)
+
+                    # Colour code by time to off
+                    if secs < 0:
+                        time_label = "✅ Off"
+                        btn_style  = "secondary"
+                    elif secs <= 600:
+                        time_label = f"⚡ {mins}m"
+                        btn_style  = "primary"
+                    elif secs <= 1800:
+                        time_label = f"🕐 {mins}m"
+                        btn_style  = "secondary"
+                    else:
+                        time_label = f"{race['start_time']}"
+                        btn_style  = "secondary"
+
+                    btn_label = f"{race['start_time']} {time_label}"
+                    if st.button(
+                        btn_label,
+                        key=f"race_{race['market_id']}",
+                        use_container_width=True,
+                        type=btn_style,
+                    ):
+                        st.session_state.market_id       = race["market_id"]
+                        st.session_state.market_data     = None
+                        st.session_state.signals         = []
+                        st.session_state.error           = ""
+                        st.session_state.price_histories = {}
+                        st.session_state.last_fetch      = 0
+                        st.rerun()
+
+        st.markdown("---")
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state.authenticated = False
+            st.session_state.connector     = None
+            st.rerun()
+
     # ── Header ────────────────────────────────────────────────────────────────
     st.markdown("""
     <div class="pots-header">
@@ -380,7 +518,7 @@ def render_dashboard():
     """, unsafe_allow_html=True)
 
     # ── Market input ───────────────────────────────────────────────────────────
-    col_url, col_btn, col_logout = st.columns([5, 1, 1])
+    col_url, col_btn = st.columns([6, 1])
     with col_url:
         raw_url = st.text_input(
             "Betfair Race URL or Market ID",
@@ -389,11 +527,6 @@ def render_dashboard():
         )
     with col_btn:
         load_btn = st.button("▶ Load", use_container_width=True, type="primary")
-    with col_logout:
-        if st.button("Logout", use_container_width=True):
-            st.session_state.authenticated = False
-            st.session_state.connector     = None
-            st.rerun()
 
     if load_btn and raw_url:
         st.session_state.market_id     = _parse_market_id(raw_url)
